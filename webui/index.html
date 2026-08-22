@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yt-dlp</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>yt-dlp</h1>
+    <p class="subtitle">Paste a video URL, pick a format, download.</p>
+
+    <form id="download-form">
+      <input
+        id="url-input"
+        type="url"
+        name="url"
+        placeholder="https://www.youtube.com/watch?v=..."
+        autocomplete="off"
+        required
+      >
+
+      <div id="preview" class="preview hidden">
+        <img id="preview-thumb" alt="">
+        <div class="preview-meta">
+          <div id="preview-title" class="preview-title"></div>
+          <div id="preview-sub" class="preview-sub"></div>
+        </div>
+      </div>
+
+      <div class="mode-row" role="radiogroup" aria-label="Download format">
+        <label class="mode-option">
+          <input type="radio" name="mode" value="video" checked>
+          <span>Video (mp4)</span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="mode" value="audio">
+          <span>Audio only (mp3)</span>
+        </label>
+      </div>
+
+      <div id="quality-row" class="quality-row">
+        <label for="quality-select">Max quality</label>
+        <select id="quality-select" name="quality">
+          <option value="">Best available</option>
+        </select>
+      </div>
+
+      <label class="checkbox-option">
+        <input type="checkbox" id="embed-checkbox" name="embed" checked>
+        <span>Embed thumbnail &amp; metadata</span>
+      </label>
+
+      <button type="submit" id="submit-btn">Download</button>
+    </form>
+
+    <div id="job" class="job hidden">
+      <div class="progress-track">
+        <div id="progress-bar" class="progress-bar"></div>
+      </div>
+      <div id="job-status" class="job-status"></div>
+      <pre id="job-log" class="job-log"></pre>
+      <a id="result-link" class="result-link hidden" href="#" download>Save file</a>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

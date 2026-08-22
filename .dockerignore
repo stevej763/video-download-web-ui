@@ -1,0 +1,8 @@
+webui/downloads/
+__pycache__/
+*.pyc
+.git
+*.mp3
+*.mp4
+*.webm
+*.mkv
