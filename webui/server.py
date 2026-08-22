@@ -111,6 +111,7 @@ def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
         YT_DLP_BIN,
         '--newline',
         '--progress',
+        '--no-quiet',
         '--no-playlist',
     ] + archive_args + [
         '-o', os.path.join(work_dir, '%(title).150B [%(id)s].%(ext)s'),
@@ -143,9 +144,14 @@ def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
                     job['progress'] = float(m.group(1))
                     job['stage'] = 'downloading'
                 else:
+                    # Only flip to a known postprocessor tag; ignore everything
+                    # else (e.g. [youtube]/[info] extraction chatter unlocked
+                    # by --no-quiet) so we don't show "Post-processing" before
+                    # the download has even started.
                     sm = STAGE_RE.match(line)
-                    if sm and sm.group(1) != 'download':
-                        job['stage'] = STAGE_LABELS.get(sm.group(1), 'Post-processing')
+                    label = sm and STAGE_LABELS.get(sm.group(1))
+                    if label:
+                        job['stage'] = label
                 # after_move:filepath prints a bare absolute path line
                 if line.startswith(work_dir):
                     filepath = line
