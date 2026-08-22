@@ -8,6 +8,7 @@ const previewSub = document.getElementById('preview-sub');
 const qualityRow = document.getElementById('quality-row');
 const qualitySelect = document.getElementById('quality-select');
 const embedCheckbox = document.getElementById('embed-checkbox');
+const localOnlyCheckbox = document.getElementById('local-only-checkbox');
 const jobBox = document.getElementById('job');
 const progressBar = document.getElementById('progress-bar');
 const jobStatus = document.getElementById('job-status');
@@ -91,6 +92,7 @@ form.addEventListener('submit', async (e) => {
         mode,
         quality: mode === 'video' ? qualitySelect.value : '',
         embed: embedCheckbox.checked,
+        save_to_nas: !localOnlyCheckbox.checked,
       }),
     });
     const data = await res.json();
@@ -121,12 +123,20 @@ function pollJob(jobId) {
       if (data.status === 'running' || data.status === 'queued') {
         jobStatus.textContent = `Downloading… ${data.progress ? data.progress.toFixed(1) + '%' : ''}`;
       } else if (data.status === 'finished') {
-        jobStatus.textContent = 'Done';
         progressBar.style.width = '100%';
         if (data.filename) {
-          resultLink.href = `/downloads/${encodeURIComponent(data.filename)}`;
+          const url = data.save_to_nas
+            ? `/downloads/${encodeURIComponent(data.filename)}`
+            : `/temp-downloads/${encodeURIComponent(jobId)}/${encodeURIComponent(data.filename)}`;
+          resultLink.href = url;
           resultLink.textContent = `Save ${data.filename}`;
           resultLink.classList.remove('hidden');
+          jobStatus.textContent = data.save_to_nas ? 'Done' : 'Done — starting your download…';
+          if (!data.save_to_nas) {
+            resultLink.click();
+          }
+        } else {
+          jobStatus.textContent = 'Done (already downloaded previously)';
         }
         clearInterval(pollTimer);
         resetButton();

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -15,6 +16,10 @@ REPO_DIR = os.path.dirname(BASE_DIR)
 YT_DLP_BIN = os.path.join(REPO_DIR, 'yt-dlp')
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'downloads')
 ARCHIVE_FILE = os.path.join(DOWNLOAD_DIR, '.download-archive.txt')
+# Not NAS-backed: local scratch space for "download to my device" jobs, one
+# subdir per job, served once then deleted.
+TEMP_DIR = os.path.join(BASE_DIR, 'temp-downloads')
+STALE_TEMP_SECONDS = 6 * 3600
 STATIC_FILES = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
@@ -22,6 +27,23 @@ STATIC_FILES = {
 }
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def cleanup_stale_temp_dirs():
+    """Reap orphaned per-job temp dirs (e.g. the browser never fetched the file)."""
+    now = time.time()
+    try:
+        names = os.listdir(TEMP_DIR)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(TEMP_DIR, name)
+        try:
+            if now - os.path.getmtime(path) > STALE_TEMP_SECONDS:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 # job_id -> {status, lines, error, filepath, progress}
 JOBS = {}
@@ -45,24 +67,41 @@ def build_mode_args(mode, quality):
     return ['-f', fmt, '--merge-output-format', 'mp4']
 
 
-def run_job(job_id, url, mode, quality=None, embed=False):
+def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
+    if save_to_nas:
+        out_dir = DOWNLOAD_DIR
+        archive_args = ['--download-archive', ARCHIVE_FILE]
+    else:
+        # Kept off the NAS entirely: a private per-job scratch dir, never
+        # recorded in the dedup archive (it won't exist once served).
+        out_dir = os.path.join(TEMP_DIR, job_id)
+        os.makedirs(out_dir, exist_ok=True)
+        archive_args = []
+
     args = [
         YT_DLP_BIN,
         '--newline',
         '--progress',
         '--no-playlist',
-        '--download-archive', ARCHIVE_FILE,
-        '-o', os.path.join(DOWNLOAD_DIR, '%(title).150B [%(id)s].%(ext)s'),
+    ] + archive_args + [
+        '-o', os.path.join(out_dir, '%(title).150B [%(id)s].%(ext)s'),
         '--print', 'after_move:filepath',
     ] + build_mode_args(mode, quality) + (EMBED_ARGS if embed else []) + [url]
 
     with JOBS_LOCK:
         JOBS[job_id]['status'] = 'running'
 
+    def fail(message):
+        with JOBS_LOCK:
+            JOBS[job_id]['status'] = 'error'
+            JOBS[job_id]['error'] = message
+        if not save_to_nas:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=DOWNLOAD_DIR,
+            text=True, bufsize=1, cwd=out_dir,
         )
         filepath = None
         for line in proc.stdout:
@@ -75,26 +114,21 @@ def run_job(job_id, url, mode, quality=None, embed=False):
                 if m:
                     job['progress'] = float(m.group(1))
                 # after_move:filepath prints a bare absolute path line
-                if line.startswith(DOWNLOAD_DIR):
+                if line.startswith(out_dir):
                     filepath = line
         proc.wait()
-        with JOBS_LOCK:
-            job = JOBS[job_id]
-            if proc.returncode == 0:
+        if proc.returncode == 0:
+            with JOBS_LOCK:
+                job = JOBS[job_id]
                 job['status'] = 'finished'
                 job['progress'] = 100
                 job['filepath'] = filepath
-            else:
-                job['status'] = 'error'
-                job['error'] = f'yt-dlp exited with code {proc.returncode}'
+        else:
+            fail(f'yt-dlp exited with code {proc.returncode}')
     except FileNotFoundError:
-        with JOBS_LOCK:
-            JOBS[job_id]['status'] = 'error'
-            JOBS[job_id]['error'] = f'yt-dlp binary not found at {YT_DLP_BIN}'
+        fail(f'yt-dlp binary not found at {YT_DLP_BIN}')
     except Exception as exc:  # noqa: BLE001
-        with JOBS_LOCK:
-            JOBS[job_id]['status'] = 'error'
-            JOBS[job_id]['error'] = str(exc)
+        fail(str(exc))
 
 
 def probe_url(url):
@@ -138,6 +172,15 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw or b'{}')
 
+    def _stream_file(self, fpath, filename):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        self.send_header('Content-Length', str(os.path.getsize(fpath)))
+        self.end_headers()
+        with open(fpath, 'rb') as f:
+            shutil.copyfileobj(f, self.wfile, length=1024 * 1024)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -174,6 +217,7 @@ class Handler(BaseHTTPRequestHandler):
                     'lines': job['lines'][-40:],
                     'error': job.get('error'),
                     'filename': filename,
+                    'save_to_nas': job.get('save_to_nas', True),
                 })
             return
 
@@ -188,13 +232,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 return
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-            self.send_header('Content-Length', str(os.path.getsize(fpath)))
-            self.end_headers()
-            with open(fpath, 'rb') as f:
-                self.wfile.write(f.read())
+            self._stream_file(fpath, filename)
+            return
+
+        if path.startswith('/temp-downloads/'):
+            rest = unquote(parsed.path[len('/temp-downloads/'):])
+            job_id, _, filename = rest.partition('/')
+            job_id = os.path.basename(job_id)
+            filename = os.path.basename(filename)
+            if not job_id or not filename or filename.startswith('.'):
+                self.send_response(404)
+                self.end_headers()
+                return
+            job_dir = os.path.join(TEMP_DIR, job_id)
+            fpath = os.path.join(job_dir, filename)
+            if not os.path.isfile(fpath):
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                self._stream_file(fpath, filename)
+            finally:
+                shutil.rmtree(job_dir, ignore_errors=True)
             return
 
         self.send_response(404)
@@ -229,11 +288,17 @@ class Handler(BaseHTTPRequestHandler):
             quality = body.get('quality')
             quality = quality if (isinstance(quality, str) and quality.isdigit()) else None
             embed = bool(body.get('embed'))
+            save_to_nas = body.get('save_to_nas')
+            save_to_nas = True if save_to_nas is None else bool(save_to_nas)
             job_id = uuid.uuid4().hex
+            if not save_to_nas:
+                cleanup_stale_temp_dirs()
             with JOBS_LOCK:
-                JOBS[job_id] = {'status': 'queued', 'lines': [], 'progress': 0}
+                JOBS[job_id] = {
+                    'status': 'queued', 'lines': [], 'progress': 0, 'save_to_nas': save_to_nas,
+                }
             threading.Thread(
-                target=run_job, args=(job_id, url, mode, quality, embed), daemon=True,
+                target=run_job, args=(job_id, url, mode, quality, embed, save_to_nas), daemon=True,
             ).start()
             self._send_json({'job_id': job_id})
             return
