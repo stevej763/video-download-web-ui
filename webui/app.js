@@ -80,6 +80,7 @@ form.addEventListener('submit', async (e) => {
   jobBox.classList.remove('hidden');
   resultLink.classList.add('hidden');
   progressBar.style.width = '0%';
+  progressBar.classList.remove('processing');
   jobLog.textContent = '';
   jobStatus.textContent = 'Queuing download…';
 
@@ -121,12 +122,17 @@ function pollJob(jobId) {
       jobLog.scrollTop = jobLog.scrollHeight;
 
       if (data.status === 'running' || data.status === 'queued') {
-        jobStatus.textContent = `Downloading… ${data.progress ? data.progress.toFixed(1) + '%' : ''}`;
+        const processing = data.stage && data.stage !== 'downloading';
+        progressBar.classList.toggle('processing', processing);
+        jobStatus.textContent = processing
+          ? `${data.stage}…`
+          : `Downloading… ${data.progress ? data.progress.toFixed(1) + '%' : ''}`;
       } else if (data.status === 'finished') {
+        progressBar.classList.remove('processing');
         progressBar.style.width = '100%';
         if (data.filename) {
           const url = data.save_to_nas
-            ? `/downloads/${encodeURIComponent(data.filename)}`
+            ? `/downloads/${encodeURIComponent(data.subfolder)}/${encodeURIComponent(data.filename)}`
             : `/temp-downloads/${encodeURIComponent(jobId)}/${encodeURIComponent(data.filename)}`;
           resultLink.href = url;
           resultLink.textContent = `Save ${data.filename}`;

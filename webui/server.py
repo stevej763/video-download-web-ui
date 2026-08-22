@@ -16,10 +16,14 @@ REPO_DIR = os.path.dirname(BASE_DIR)
 YT_DLP_BIN = os.path.join(REPO_DIR, 'yt-dlp')
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'downloads')
 ARCHIVE_FILE = os.path.join(DOWNLOAD_DIR, '.download-archive.txt')
-# Not NAS-backed: local scratch space for "download to my device" jobs, one
-# subdir per job, served once then deleted.
+# NAS-backed but hidden: yt-dlp writes/merges/embeds here first, one subdir per
+# job, so nobody browsing the NAS share sees .part files or half-written output.
+INPROGRESS_DIR = os.path.join(DOWNLOAD_DIR, '.in-progress')
+# Not NAS-backed at all: local scratch space for "download to my device" jobs,
+# one subdir per job, served once then deleted.
 TEMP_DIR = os.path.join(BASE_DIR, 'temp-downloads')
 STALE_TEMP_SECONDS = 6 * 3600
+MODE_SUBFOLDER = {'video': 'video', 'audio': 'mp3'}
 STATIC_FILES = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
@@ -27,18 +31,21 @@ STATIC_FILES = {
 }
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(INPROGRESS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
+for _sub in MODE_SUBFOLDER.values():
+    os.makedirs(os.path.join(DOWNLOAD_DIR, _sub), exist_ok=True)
 
 
-def cleanup_stale_temp_dirs():
-    """Reap orphaned per-job temp dirs (e.g. the browser never fetched the file)."""
+def cleanup_stale_dirs(base_dir):
+    """Reap orphaned per-job scratch dirs (e.g. a crash, or the browser never fetched the file)."""
     now = time.time()
     try:
-        names = os.listdir(TEMP_DIR)
+        names = os.listdir(base_dir)
     except OSError:
         return
     for name in names:
-        path = os.path.join(TEMP_DIR, name)
+        path = os.path.join(base_dir, name)
         try:
             if now - os.path.getmtime(path) > STALE_TEMP_SECONDS:
                 shutil.rmtree(path, ignore_errors=True)
@@ -50,6 +57,28 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 PROGRESS_RE = re.compile(r'(\d{1,3}\.\d)%')
+STAGE_RE = re.compile(r'^\[(\w+)\]')
+# yt-dlp postprocessor tag -> human label. Tags are each PP class's name with
+# the "FFmpeg" prefix and "PP" suffix stripped (see PostProcessor.pp_key()).
+STAGE_LABELS = {
+    'Merger': 'Merging video and audio',
+    'ExtractAudio': 'Extracting audio',
+    'VideoConvertor': 'Converting video',
+    'EmbedSubtitle': 'Embedding subtitles',
+    'Metadata': 'Embedding metadata',
+    'EmbedThumbnail': 'Embedding thumbnail',
+    'SponsorBlock': 'Applying SponsorBlock',
+    'ThumbnailsConvertor': 'Converting thumbnail',
+    'SubtitlesConvertor': 'Converting subtitles',
+    'SplitChapters': 'Splitting chapters',
+    'FixupM3u8': 'Fixing up stream',
+    'FixupM4a': 'Fixing up audio container',
+    'FixupStretched': 'Fixing up video',
+    'FixupTimestamp': 'Fixing up timestamps',
+    'CopyStream': 'Finalizing stream',
+    'Concat': 'Concatenating files',
+    'MoveFilesAfterDownload': 'Moving file into place',
+}
 
 VALID_MODES = ('video', 'audio')
 
@@ -68,15 +97,15 @@ def build_mode_args(mode, quality):
 
 
 def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
+    # Both branches stage into a private per-job scratch dir first, so
+    # nothing partially-written is ever visible at its final, browsable path.
     if save_to_nas:
-        out_dir = DOWNLOAD_DIR
+        work_dir = os.path.join(INPROGRESS_DIR, job_id)
         archive_args = ['--download-archive', ARCHIVE_FILE]
     else:
-        # Kept off the NAS entirely: a private per-job scratch dir, never
-        # recorded in the dedup archive (it won't exist once served).
-        out_dir = os.path.join(TEMP_DIR, job_id)
-        os.makedirs(out_dir, exist_ok=True)
+        work_dir = os.path.join(TEMP_DIR, job_id)
         archive_args = []
+    os.makedirs(work_dir, exist_ok=True)
 
     args = [
         YT_DLP_BIN,
@@ -84,7 +113,7 @@ def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
         '--progress',
         '--no-playlist',
     ] + archive_args + [
-        '-o', os.path.join(out_dir, '%(title).150B [%(id)s].%(ext)s'),
+        '-o', os.path.join(work_dir, '%(title).150B [%(id)s].%(ext)s'),
         '--print', 'after_move:filepath',
     ] + build_mode_args(mode, quality) + (EMBED_ARGS if embed else []) + [url]
 
@@ -95,13 +124,12 @@ def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
         with JOBS_LOCK:
             JOBS[job_id]['status'] = 'error'
             JOBS[job_id]['error'] = message
-        if not save_to_nas:
-            shutil.rmtree(out_dir, ignore_errors=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=out_dir,
+            text=True, bufsize=1, cwd=work_dir,
         )
         filepath = None
         for line in proc.stdout:
@@ -113,18 +141,37 @@ def run_job(job_id, url, mode, quality=None, embed=False, save_to_nas=True):
                 m = PROGRESS_RE.search(line)
                 if m:
                     job['progress'] = float(m.group(1))
+                    job['stage'] = 'downloading'
+                else:
+                    sm = STAGE_RE.match(line)
+                    if sm and sm.group(1) != 'download':
+                        job['stage'] = STAGE_LABELS.get(sm.group(1), 'Post-processing')
                 # after_move:filepath prints a bare absolute path line
-                if line.startswith(out_dir):
+                if line.startswith(work_dir):
                     filepath = line
         proc.wait()
-        if proc.returncode == 0:
-            with JOBS_LOCK:
-                job = JOBS[job_id]
-                job['status'] = 'finished'
-                job['progress'] = 100
-                job['filepath'] = filepath
-        else:
+        if proc.returncode != 0:
             fail(f'yt-dlp exited with code {proc.returncode}')
+            return
+
+        final_path = filepath
+        if save_to_nas:
+            if filepath:
+                with JOBS_LOCK:
+                    JOBS[job_id]['stage'] = 'Finalizing'
+                # Same CIFS mount on both sides, so this is a fast rename,
+                # not a second copy over the network.
+                dest_dir = os.path.join(DOWNLOAD_DIR, MODE_SUBFOLDER[mode])
+                dest_path = os.path.join(dest_dir, os.path.basename(filepath))
+                shutil.move(filepath, dest_path)
+                final_path = dest_path
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        with JOBS_LOCK:
+            job = JOBS[job_id]
+            job['status'] = 'finished'
+            job['progress'] = 100
+            job['filepath'] = final_path
     except FileNotFoundError:
         fail(f'yt-dlp binary not found at {YT_DLP_BIN}')
     except Exception as exc:  # noqa: BLE001
@@ -217,17 +264,22 @@ class Handler(BaseHTTPRequestHandler):
                     'lines': job['lines'][-40:],
                     'error': job.get('error'),
                     'filename': filename,
+                    'subfolder': job.get('subfolder'),
                     'save_to_nas': job.get('save_to_nas', True),
+                    'stage': job.get('stage', 'downloading'),
                 })
             return
 
         if path.startswith('/downloads/'):
-            filename = os.path.basename(unquote(parsed.path[len('/downloads/'):]))
-            if not filename or filename.startswith('.'):
+            rest = unquote(parsed.path[len('/downloads/'):])
+            subfolder, _, filename = rest.rpartition('/')
+            subfolder = os.path.basename(subfolder)
+            filename = os.path.basename(filename)
+            if subfolder not in MODE_SUBFOLDER.values() or not filename or filename.startswith('.'):
                 self.send_response(404)
                 self.end_headers()
                 return
-            fpath = os.path.join(DOWNLOAD_DIR, filename)
+            fpath = os.path.join(DOWNLOAD_DIR, subfolder, filename)
             if not os.path.isfile(fpath):
                 self.send_response(404)
                 self.end_headers()
@@ -291,11 +343,12 @@ class Handler(BaseHTTPRequestHandler):
             save_to_nas = body.get('save_to_nas')
             save_to_nas = True if save_to_nas is None else bool(save_to_nas)
             job_id = uuid.uuid4().hex
-            if not save_to_nas:
-                cleanup_stale_temp_dirs()
+            cleanup_stale_dirs(TEMP_DIR)
+            cleanup_stale_dirs(INPROGRESS_DIR)
             with JOBS_LOCK:
                 JOBS[job_id] = {
                     'status': 'queued', 'lines': [], 'progress': 0, 'save_to_nas': save_to_nas,
+                    'subfolder': MODE_SUBFOLDER[mode] if save_to_nas else None,
                 }
             threading.Thread(
                 target=run_job, args=(job_id, url, mode, quality, embed, save_to_nas), daemon=True,

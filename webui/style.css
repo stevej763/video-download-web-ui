@@ -206,6 +206,15 @@ h1 {
   transition: width 0.3s ease;
 }
 
+.progress-bar.processing {
+  animation: progress-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 .job-status {
   margin-top: 10px;
   font-size: 0.85rem;
