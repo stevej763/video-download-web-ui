@@ -13,10 +13,16 @@ const jobBox = document.getElementById('job');
 const progressBar = document.getElementById('progress-bar');
 const jobStatus = document.getElementById('job-status');
 const jobLog = document.getElementById('job-log');
+const logToggle = document.getElementById('log-toggle');
 const resultLink = document.getElementById('result-link');
 
 let probeTimer = null;
 let pollTimer = null;
+
+logToggle.addEventListener('click', () => {
+  const showing = jobLog.classList.toggle('hidden') === false;
+  logToggle.textContent = showing ? 'Hide details' : 'Show details';
+});
 
 function resetQualityOptions() {
   qualitySelect.innerHTML = '<option value="">Best available</option>';

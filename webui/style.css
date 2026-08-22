@@ -221,6 +221,22 @@ h1 {
   font-weight: 600;
 }
 
+.log-toggle {
+  display: block;
+  margin-top: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.log-toggle:hover {
+  color: var(--text);
+}
+
 .job-log {
   margin-top: 8px;
   max-height: 160px;
