@@ -53,7 +53,7 @@ urlInput.addEventListener('input', () => {
 });
 
 function showPreviewLoading() {
-  previewThumb.src = '';
+  previewThumb.removeAttribute('src');
   previewTitle.textContent = 'Loading…';
   previewSub.textContent = '';
   preview.classList.remove('hidden');
@@ -76,7 +76,11 @@ async function probeUrl(url, token) {
       return;
     }
     preview.classList.remove('loading');
-    previewThumb.src = data.thumbnail || '';
+    if (data.thumbnail) {
+      previewThumb.src = data.thumbnail;
+    } else {
+      previewThumb.removeAttribute('src');
+    }
     previewTitle.textContent = data.title || url;
     previewSub.textContent = [data.uploader, data.duration_string].filter(Boolean).join(' · ');
     preview.classList.remove('hidden');
