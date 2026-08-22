@@ -110,6 +110,28 @@ h1 {
   margin-top: 2px;
 }
 
+.preview.loading img,
+.preview.loading .preview-title,
+.preview.loading .preview-sub {
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+.preview.loading .preview-title,
+.preview.loading .preview-sub {
+  color: transparent;
+  background: var(--border);
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.preview.loading .preview-title { width: 70%; height: 0.95rem; }
+.preview.loading .preview-sub { width: 45%; height: 0.78rem; margin-top: 4px; }
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 .mode-row {
   display: flex;
   gap: 10px;

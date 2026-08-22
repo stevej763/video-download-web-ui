@@ -18,6 +18,7 @@ const resultLink = document.getElementById('result-link');
 
 let probeTimer = null;
 let pollTimer = null;
+let probeToken = 0;
 
 logToggle.addEventListener('click', () => {
   const showing = jobLog.classList.toggle('hidden') === false;
@@ -40,16 +41,27 @@ updateQualityVisibility();
 
 urlInput.addEventListener('input', () => {
   clearTimeout(probeTimer);
+  probeToken += 1;
   const url = urlInput.value.trim();
   resetQualityOptions();
   if (!url) {
     preview.classList.add('hidden');
+    preview.classList.remove('loading');
     return;
   }
-  probeTimer = setTimeout(() => probeUrl(url), 600);
+  probeTimer = setTimeout(() => probeUrl(url, probeToken), 600);
 });
 
-async function probeUrl(url) {
+function showPreviewLoading() {
+  previewThumb.src = '';
+  previewTitle.textContent = 'Loading…';
+  previewSub.textContent = '';
+  preview.classList.remove('hidden');
+  preview.classList.add('loading');
+}
+
+async function probeUrl(url, token) {
+  showPreviewLoading();
   try {
     const res = await fetch('/api/probe', {
       method: 'POST',
@@ -57,7 +69,13 @@ async function probeUrl(url) {
       body: JSON.stringify({ url }),
     });
     const data = await res.json();
-    if (!res.ok || data.error) return;
+    if (token !== probeToken) return; // superseded by a newer edit
+    if (!res.ok || data.error) {
+      preview.classList.add('hidden');
+      preview.classList.remove('loading');
+      return;
+    }
+    preview.classList.remove('loading');
     previewThumb.src = data.thumbnail || '';
     previewTitle.textContent = data.title || url;
     previewSub.textContent = [data.uploader, data.duration_string].filter(Boolean).join(' · ');
@@ -71,7 +89,9 @@ async function probeUrl(url) {
       qualitySelect.appendChild(opt);
     });
   } catch (_) {
-    // silently ignore preview failures
+    if (token !== probeToken) return;
+    preview.classList.add('hidden');
+    preview.classList.remove('loading');
   }
 }
 
