@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, quote, unquote
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(BASE_DIR)
@@ -228,7 +228,15 @@ class Handler(BaseHTTPRequestHandler):
     def _stream_file(self, fpath, filename):
         self.send_response(200)
         self.send_header('Content-Type', 'application/octet-stream')
-        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        # http.server encodes headers as strict latin-1, so a raw non-ASCII
+        # title (em dash, curly quote, emoji...) would raise mid-response.
+        # Send an ASCII fallback plus the RFC 5987 UTF-8 form browsers prefer.
+        ascii_name = filename.encode('ascii', 'replace').decode('ascii')
+        ascii_name = ascii_name.replace('\\', '_').replace('"', "'")
+        self.send_header(
+            'Content-Disposition',
+            f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(filename, safe="")}',
+        )
         self.send_header('Content-Length', str(os.path.getsize(fpath)))
         self.end_headers()
         with open(fpath, 'rb') as f:
