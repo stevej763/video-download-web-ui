@@ -15,10 +15,41 @@ const jobStatus = document.getElementById('job-status');
 const jobLog = document.getElementById('job-log');
 const logToggle = document.getElementById('log-toggle');
 const resultLink = document.getElementById('result-link');
+const nasBanner = document.getElementById('nas-banner');
 
 let probeTimer = null;
 let pollTimer = null;
 let probeToken = 0;
+let nasForcedLocal = false;
+
+function setNasStatus(available, reason) {
+  nasBanner.textContent = available
+    ? ''
+    : `NAS unavailable${reason ? ` (${reason})` : ''} — only local downloads are available.`;
+  nasBanner.classList.toggle('hidden', available);
+  localOnlyCheckbox.disabled = !available;
+  if (!available) {
+    nasForcedLocal = nasForcedLocal || !localOnlyCheckbox.checked;
+    localOnlyCheckbox.checked = true;
+  } else if (nasForcedLocal) {
+    // Only undo the tick we forced; leave it if the user chose local-only.
+    localOnlyCheckbox.checked = false;
+    nasForcedLocal = false;
+  }
+}
+
+async function refreshNasStatus() {
+  try {
+    const res = await fetch('/api/nas-status');
+    const data = await res.json();
+    setNasStatus(Boolean(data.available), data.reason);
+  } catch (_) {
+    // server unreachable; leave the last known state
+  }
+}
+
+refreshNasStatus();
+setInterval(refreshNasStatus, 15000);
 
 logToggle.addEventListener('click', () => {
   const showing = jobLog.classList.toggle('hidden') === false;
@@ -129,6 +160,7 @@ form.addEventListener('submit', async (e) => {
     const data = await res.json();
     if (!res.ok || data.error) {
       jobStatus.textContent = `Error: ${data.error || 'failed to start'}`;
+      if (data.nas_unavailable) refreshNasStatus();
       resetButton();
       return;
     }

@@ -24,18 +24,20 @@ Docker:
 docker compose up --build
 ```
 
-This builds from `Dockerfile`, exposes port 8787, and mounts a named Docker volume (`nas-downloads`) at `/app/webui/downloads` so downloaded files land on a network share rather than local disk. The container runs as non-root `appuser`.
+This builds from `Dockerfile` and exposes port 8787. The entrypoint (`docker-entrypoint.sh`) starts as root, tries to mount the NAS share at `/app/webui/downloads`, then drops to non-root `appuser` (via `setpriv`) to run the server.
 
 There is no build step, package manifest, linter, or test suite in this repo — it's plain stdlib Python + vanilla JS/HTML/CSS with no dependencies to install.
 
-### Downloads storage: SMB/CIFS NAS volume
+### Downloads storage: SMB/CIFS NAS, mounted inside the container
 
-`docker-compose.yml` defines `nas-downloads` as a `local`-driver volume with `driver_opts: {type: cifs, ...}`, pointing at `//${NAS_HOST}/${NAS_SHARE}`. This means **the CIFS mount happens on the Docker host itself** (via `mount.cifs`), not inside the container — the container just sees a normal directory at `/app/webui/downloads`.
+The share is mounted **by `docker-entrypoint.sh` inside the container**, deliberately *not* as a Docker CIFS volume: a Docker-managed volume mount failure aborts container start, whereas this way an unreachable NAS just means local-only mode.
 
-- Requires `cifs-utils` installed on the Docker host (provides `mount.cifs`). Without it, `docker compose up` fails to create the volume.
-- Credentials (`NAS_HOST`, `NAS_SHARE`, `NAS_USER`, `NAS_PASS`) are read from a local `.env` file (gitignored, never committed) via compose's `${VAR}` substitution. `.env.example` documents the required keys.
-- The mount options force `uid=1000,gid=1000` (matching the `appuser` created in `Dockerfile`) so files written by the container are owned correctly from the NAS's perspective, regardless of what UID the SMB server reports.
-- If `docker compose up` errors that it can't create/mount the volume, check: `cifs-utils` is installed on the host, `.env` has the real password (not the `changeme` placeholder), and the NAS hostname resolves (mDNS hostnames like `*.local` need Avahi/mDNS support on the Docker host).
+- `docker-compose.yml` grants `SYS_ADMIN` + `DAC_READ_SEARCH` and `apparmor:unconfined` (AppArmor's default Docker profile blocks `mount(2)`). `cifs-utils` is installed in the image; the host doesn't need it.
+- Credentials (`NAS_HOST`, `NAS_SHARE`, `NAS_USER`, `NAS_PASS`) come from a local `.env` (gitignored) via `env_file`. The entrypoint writes them to a root-only `/run/nas-credentials` and strips `NAS_USER`/`NAS_PASS` from the server's environment. `NAS_HOST` must resolve *inside the container* — mDNS names like `*.local` won't, so use an IP (or `extra_hosts`).
+- If the initial mount fails, a background root loop retries every `NAS_RETRY_SECONDS` (default 60).
+- Mount options force `uid=1000,gid=1000` (matching `appuser`) and `soft` so I/O errors out rather than hanging if the NAS disappears.
+- **NAS availability in the server:** when `NAS_HOST` is set, `nas_monitor` re-checks every 15s that `DOWNLOAD_DIR` is a CIFS mount (`/proc/mounts`) and that port 445 answers, and publishes `NAS_STATUS` via `GET /api/nas-status`. `/api/download` rejects `save_to_nas` jobs with 503 while unavailable; the UI shows a banner and forces "Download to my device only". When `NAS_HOST` is unset (local, non-Docker runs), `DOWNLOAD_DIR` is treated as plain local storage and always available.
+- NAS subdirs (`video/`, `mp3/`, `.in-progress/`) are created by `ensure_download_dirs()` only once the NAS checks pass — never at import time — so nothing is written to the container filesystem underneath the mount point.
 
 ## Architecture
 

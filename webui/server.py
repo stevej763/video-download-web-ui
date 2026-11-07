@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -30,11 +31,67 @@ STATIC_FILES = {
     '/style.css': ('style.css', 'text/css; charset=utf-8'),
 }
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-os.makedirs(INPROGRESS_DIR, exist_ok=True)
+# Set (via .env) when DOWNLOAD_DIR is expected to be a CIFS mount of the NAS
+# share (docker-entrypoint.sh mounts it). Unset when running locally without
+# Docker, in which case DOWNLOAD_DIR is just a plain local directory.
+NAS_HOST = os.environ.get('NAS_HOST', '').strip()
+NAS_CHECK_INTERVAL = 15
+# Replaced wholesale (never mutated) by nas_monitor, so readers need no lock.
+NAS_STATUS = {'available': not NAS_HOST, 'reason': None}
+
 os.makedirs(TEMP_DIR, exist_ok=True)
-for _sub in MODE_SUBFOLDER.values():
-    os.makedirs(os.path.join(DOWNLOAD_DIR, _sub), exist_ok=True)
+
+
+def ensure_download_dirs():
+    # Must run after the NAS is mounted: dirs created before then would land
+    # on the container's own filesystem and be hidden by the mount.
+    os.makedirs(INPROGRESS_DIR, exist_ok=True)
+    for sub in MODE_SUBFOLDER.values():
+        os.makedirs(os.path.join(DOWNLOAD_DIR, sub), exist_ok=True)
+
+
+def is_cifs_mounted(path):
+    try:
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == path and parts[2] in ('cifs', 'smb3'):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def check_nas():
+    """Return (available, reason). Never writes to DOWNLOAD_DIR unless it's really the NAS."""
+    if NAS_HOST:
+        if not is_cifs_mounted(DOWNLOAD_DIR):
+            return False, 'NAS share is not mounted'
+        # A CIFS mount stays listed after the server drops off the network, so
+        # also check the SMB port is actually answering.
+        try:
+            socket.create_connection((NAS_HOST, 445), timeout=3).close()
+        except OSError:
+            return False, f'cannot reach {NAS_HOST}'
+    try:
+        ensure_download_dirs()
+    except OSError as exc:
+        return False, f'download folder not writable: {exc.strerror or exc}'
+    return True, None
+
+
+def refresh_nas_status():
+    global NAS_STATUS
+    available, reason = check_nas()
+    if available != NAS_STATUS['available']:
+        print('NAS available' if available else f'NAS unavailable ({reason}); local downloads only')
+    NAS_STATUS = {'available': available, 'reason': reason}
+
+
+def nas_monitor():
+    while True:
+        time.sleep(NAS_CHECK_INTERVAL)
+        refresh_nas_status()
 
 
 def cleanup_stale_dirs(base_dir):
@@ -284,6 +341,10 @@ class Handler(BaseHTTPRequestHandler):
                 })
             return
 
+        if path == '/api/nas-status':
+            self._send_json(NAS_STATUS)
+            return
+
         if path.startswith('/downloads/'):
             rest = unquote(parsed.path[len('/downloads/'):])
             subfolder, _, filename = rest.rpartition('/')
@@ -356,9 +417,16 @@ class Handler(BaseHTTPRequestHandler):
             embed = bool(body.get('embed'))
             save_to_nas = body.get('save_to_nas')
             save_to_nas = True if save_to_nas is None else bool(save_to_nas)
+            if save_to_nas and not NAS_STATUS['available']:
+                self._send_json({
+                    'error': 'NAS is unavailable — only local downloads are available right now',
+                    'nas_unavailable': True,
+                }, 503)
+                return
             job_id = uuid.uuid4().hex
             cleanup_stale_dirs(TEMP_DIR)
-            cleanup_stale_dirs(INPROGRESS_DIR)
+            if save_to_nas:
+                cleanup_stale_dirs(INPROGRESS_DIR)
             with JOBS_LOCK:
                 JOBS[job_id] = {
                     'status': 'queued', 'lines': [], 'progress': 0, 'save_to_nas': save_to_nas,
@@ -377,9 +445,13 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     host = os.environ.get('YTDLP_WEBUI_HOST', '127.0.0.1')
     port = int(os.environ.get('YTDLP_WEBUI_PORT', '8787'))
+    refresh_nas_status()
+    threading.Thread(target=nas_monitor, daemon=True).start()
     server = ThreadingHTTPServer((host, port), Handler)
     print(f'yt-dlp web UI running at http://{host}:{port}')
     print(f'Downloads are saved to: {DOWNLOAD_DIR}')
+    if not NAS_STATUS['available']:
+        print(f'WARNING: NAS unavailable ({NAS_STATUS["reason"]}); local downloads only')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

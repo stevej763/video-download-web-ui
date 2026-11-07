@@ -7,6 +7,9 @@
   --accent: #e0364f;
   --accent-dim: #f4dde1;
   --border: #e4e4e8;
+  --warn-bg: #fff6e0;
+  --warn-border: #f1d58a;
+  --warn-text: #7a5a00;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -19,6 +22,9 @@
     --accent: #ff5c72;
     --accent-dim: #3a2028;
     --border: #333338;
+    --warn-bg: #3a3018;
+    --warn-border: #6b5a24;
+    --warn-text: #f3d77e;
   }
 }
 
@@ -284,6 +290,22 @@ h1 {
   font-weight: 600;
   text-decoration: none;
   font-size: 0.9rem;
+}
+
+.nas-banner {
+  margin: -8px 0 20px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.checkbox-option:has(input:disabled) {
+  cursor: not-allowed;
+  color: var(--text-dim);
 }
 
 .hidden { display: none !important; }
