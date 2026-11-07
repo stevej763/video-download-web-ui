@@ -3,18 +3,11 @@ services:
     build: .
     ports:
       - "8787:8787"
-    # NAS_HOST / NAS_SHARE / NAS_USER / NAS_PASS. The share is mounted inside
-    # the container by docker-entrypoint.sh (not as a Docker volume), so an
-    # unreachable NAS doesn't stop the container from starting.
-    env_file: .env
-    # Needed for mount.cifs inside the container. apparmor:unconfined is
-    # required on AppArmor hosts (Ubuntu/Debian), whose default Docker profile
-    # blocks mount(2) even with CAP_SYS_ADMIN.
-    cap_add:
-      - SYS_ADMIN
-      - DAC_READ_SEARCH
-    security_opt:
-      - apparmor:unconfined
-    # Reaps the entrypoint's background mount-retry loop if it ever exits.
-    init: true
+    volumes:
+      - local-downloads:/app/webui/downloads
     restart: unless-stopped
+
+# Plain local Docker volume. docker-compose.override.yml (loaded automatically
+# unless COMPOSE_FILE is set in .env) swaps this for the NAS share.
+volumes:
+  local-downloads:

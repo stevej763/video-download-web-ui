@@ -1,0 +1,15 @@
+# NAS (SMB/CIFS) storage for downloads. Compose loads this file automatically;
+# set COMPOSE_FILE=docker-compose.yml in .env to skip it and keep downloads on
+# a local Docker volume instead.
+services:
+  yt-dlp-webui:
+    volumes:
+      - nas-downloads:/app/webui/downloads
+
+volumes:
+  nas-downloads:
+    driver: local
+    driver_opts:
+      type: cifs
+      o: "username=${NAS_USER},password=${NAS_PASS},vers=3.0,uid=1000,gid=1000,file_mode=0664,dir_mode=0775,rw"
+      device: "//${NAS_HOST}/${NAS_SHARE}"
